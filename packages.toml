@@ -8,6 +8,11 @@ packages = [
     "visual-studio-code-bin",
     "yay-bin",
     "yubico-authenticator-bin",
+    "wayvr-bin",
+    "xrizer-common",
+    "xrizer",
+    "wivrn-server",
+    "wivrn-dashboard"
 ]
 
 # Optional: pacman repository name and the fixed GitHub release tag used as

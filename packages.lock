@@ -28,6 +28,38 @@ version = "1.147.0-1"
 commit = "2e0372fb14fbc1b39b655e6f324bbd758c9c1c66"
 
 [[package]]
+name = "wayvr-bin"
+source = "aur"
+version = "26.8.0-1"
+commit = "06e7784210a023512cd304069faa96377bd31f59"
+
+[[package]]
+name = "wivrn-dashboard"
+pkgbase = "wivrn-server"
+source = "aur"
+version = "26.9-1"
+commit = "89e2dc3b9ded1d2c5c0c408e7c43e5307ef3d01a"
+
+[[package]]
+name = "wivrn-server"
+source = "aur"
+version = "26.9-1"
+commit = "89e2dc3b9ded1d2c5c0c408e7c43e5307ef3d01a"
+
+[[package]]
+name = "xrizer"
+source = "aur"
+version = "0.6-1"
+commit = "92460ad4601e68f67a8d620564866dd3bf5f85fb"
+
+[[package]]
+name = "xrizer-common"
+pkgbase = "xrizer"
+source = "aur"
+version = "0.6-1"
+commit = "92460ad4601e68f67a8d620564866dd3bf5f85fb"
+
+[[package]]
 name = "yay-bin"
 source = "aur"
 version = "13.1.0-1"
