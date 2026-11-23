@@ -182,8 +182,25 @@ def test_format_summary_no_duplicate_failures() -> None:
 
 
 def test_parse_srcinfo() -> None:
-    parsed = parse_srcinfo("pkgbase = demo\n\tdepends = foo\n\tmakedepends = bar\n")
-    assert parsed == {"pkgbase": ["demo"], "depends": ["foo"], "makedepends": ["bar"]}
+    srcinfo = (
+        "pkgbase = wivrn-server\n"
+        "\tdepends = top-dep\n"
+        "\tmakedepends = cmake\n"
+        "\tvalidpgpkeys = ABC123\n"
+        "\n"
+        "pkgname = wivrn-server\n"
+        "\tdepends = lib32-vulkan-icd-loader\n"
+        "\n"
+        "pkgname = wivrn-dashboard\n"
+        "\tdepends = wivrn-server=26.9-1\n"
+    )
+    parsed = parse_srcinfo(srcinfo)
+    assert parsed == {
+        "pkgbase": ["wivrn-server"],
+        "depends": ["top-dep"],
+        "makedepends": ["cmake"],
+        "validpgpkeys": ["ABC123"],
+    }
 
 
 def test_staging_repo_pacman_conf_order(tmp_path: Path) -> None:

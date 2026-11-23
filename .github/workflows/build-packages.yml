@@ -59,9 +59,10 @@ jobs:
       - name: Build and publish packages
         env:
           FORCE_REBUILD: ${{ github.event.inputs.force }}
+          UV_LINK_MODE: copy
         run: |
           if [[ "${FORCE_REBUILD}" == "true" ]]; then
-            uv run --frozen arch-build --force
+            uv run --frozen --no-dev arch-build --force
           else
-            uv run --frozen arch-build
+            uv run --frozen --no-dev arch-build
           fi

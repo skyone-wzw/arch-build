@@ -32,7 +32,7 @@ jobs:
 
       - name: Check local and AUR packages
         id: check
-        run: uv run --frozen arch-check-update
+        run: uv run --frozen --no-dev arch-check-update
 
       - name: Create or update pull request
         if: steps.check.outputs.changed == 'true' && steps.check.outputs.failed != 'true'

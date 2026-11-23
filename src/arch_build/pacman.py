@@ -88,6 +88,11 @@ def referenced_filenames(entries: dict[str, DbEntry]) -> set[str]:
 
 
 def parse_srcinfo(text: str) -> dict[str, list[str]]:
+    """Parse global pkgbase fields from .SRCINFO, matching makepkg's dep resolution.
+
+    Per-package sections (starting at ``pkgname = ...``) contain runtime-only
+    overrides that may reference sibling packages built by the same PKGBUILD.
+    """
     fields: dict[str, list[str]] = {}
     for line in text.splitlines():
         if "=" not in line:
@@ -95,6 +100,8 @@ def parse_srcinfo(text: str) -> dict[str, list[str]]:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip()
+        if key == "pkgname":
+            break
         if key and value:
             fields.setdefault(key, []).append(value)
     return fields

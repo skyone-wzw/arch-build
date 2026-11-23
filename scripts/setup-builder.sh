@@ -8,7 +8,10 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-pacman -S --noconfirm --needed --noprogressbar --asdeps \
+# Enable official [multilib] repository so lib32-* build dependencies resolve.
+sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
+
+pacman -Syu --noconfirm --needed --noprogressbar --asdeps \
   base-devel \
   ca-certificates \
   curl \
