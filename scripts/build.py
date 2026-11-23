@@ -61,6 +61,14 @@ class Target:
     package_names: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass
+class DbEntry:
+    name: str
+    base: str
+    version: str
+    filename: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Database access
 # ---------------------------------------------------------------------------
@@ -89,13 +97,12 @@ def parse_desc(text: str) -> dict[str, str]:
     return fields
 
 
-def read_database(path: Path) -> tuple[dict[str, str], set[str]]:
-    """Return (package name -> version, referenced package filenames)."""
+def read_database(path: Path) -> dict[str, DbEntry]:
+    """Return the database entries keyed by package name."""
     if not path.is_file():
-        return {}, set()
+        return {}
 
-    versions: dict[str, str] = {}
-    filenames: set[str] = set()
+    entries: dict[str, DbEntry] = {}
     with tarfile.open(path, "r:gz") as archive:
         for member in archive:
             if not member.isfile() or not member.name.endswith("/desc"):
@@ -105,23 +112,42 @@ def read_database(path: Path) -> tuple[dict[str, str], set[str]]:
                 continue
             desc = parse_desc(handle.read().decode("utf-8", "replace"))
             name = desc.get("NAME")
-            if name:
-                versions[name] = desc.get("VERSION", "")
-            filename = desc.get("FILENAME")
-            if filename:
-                filenames.add(filename)
-    return versions, filenames
+            if not name:
+                continue
+            entries[name] = DbEntry(
+                name=name,
+                base=desc.get("BASE") or name,
+                version=desc.get("VERSION", ""),
+                filename=desc.get("FILENAME", ""),
+            )
+    return entries
+
+
+def database_versions(entries: dict[str, DbEntry]) -> dict[str, str]:
+    return {name: entry.version for name, entry in entries.items()}
+
+
+def referenced_filenames(entries: dict[str, DbEntry]) -> set[str]:
+    return {entry.filename for entry in entries.values() if entry.filename}
 
 
 # ---------------------------------------------------------------------------
 # Planning
 # ---------------------------------------------------------------------------
 
-def plan_targets(config: dict, db_versions: dict[str, str], force: bool) -> list[Target]:
+def load_local_packages() -> list[tuple[Path, dict]]:
+    return [(pkg_dir, read_pkgbuild(pkg_dir)) for pkg_dir in local_package_dirs()]
+
+
+def plan_targets(
+    config: dict,
+    db_versions: dict[str, str],
+    force: bool,
+    local_packages: list[tuple[Path, dict]],
+) -> list[Target]:
     targets: list[Target] = []
 
-    for pkg_dir in local_package_dirs():
-        info = read_pkgbuild(pkg_dir)
+    for pkg_dir, info in local_packages:
         outdated = force or any(
             db_versions.get(name) != info["version"] for name in info["pkgname"]
         )
@@ -158,6 +184,40 @@ def plan_targets(config: dict, db_versions: dict[str, str], force: bool) -> list
             )
 
     return targets
+
+
+def plan_removals(
+    config: dict,
+    db_entries: dict[str, DbEntry],
+    local_packages: list[tuple[Path, dict]],
+) -> list[str]:
+    """Return database package names that are no longer produced by any source.
+
+    Every database entry records its pkgbase (%BASE%), so removing an AUR
+    entry, a local package directory, or one package of a split local build is
+    detected without keeping extra state.
+    """
+    local_bases = {info["pkgbase"] for _, info in local_packages}
+    local_names = {name for _, info in local_packages for name in info["pkgname"]}
+    aur_names = set(aur_package_names(config))
+
+    desired_bases = local_bases | aur_names
+    # A configured name may be a split-package member whose base differs.
+    for name in aur_names:
+        entry = db_entries.get(name)
+        if entry:
+            desired_bases.add(entry.base)
+
+    removals: list[str] = []
+    for name, entry in db_entries.items():
+        base = entry.base or name
+        if base in local_bases:
+            # Local split packages are known exactly; drop removed members.
+            if name not in local_names:
+                removals.append(name)
+        elif base not in desired_bases:
+            removals.append(name)
+    return sorted(removals)
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +480,12 @@ def build_target(target: Target, pkgs_dir: Path, skip_pgpcheck: bool) -> list[Pa
 # Publishing
 # ---------------------------------------------------------------------------
 
-def update_database(repo_name: str, packages: list[Path], db_path: Path) -> tuple[dict[str, str], set[str]]:
+def update_database(
+    repo_name: str,
+    packages: list[Path],
+    removals: list[str],
+    db_path: Path,
+) -> dict[str, DbEntry]:
     staging = WORK / "repo"
     if staging.exists():
         shutil.rmtree(staging)
@@ -433,7 +498,10 @@ def update_database(repo_name: str, packages: list[Path], db_path: Path) -> tupl
     if existing_files.is_file():
         shutil.copy2(existing_files, staging / f"{repo_name}.files.tar.gz")
 
-    run(["repo-add", "--quiet", work_db, *packages])
+    if removals:
+        run(["repo-remove", "--quiet", work_db, *removals])
+    if packages:
+        run(["repo-add", "--quiet", work_db, *packages])
 
     arch_dir = ROOT / "archlinux"
     arch_dir.mkdir(parents=True, exist_ok=True)
@@ -563,7 +631,9 @@ def git_auth_env() -> dict[str, str]:
     return env
 
 
-def commit_database(repo_name: str, packages: list[Path]) -> None:
+def commit_database(
+    repo_name: str, packages: list[Path], removals: list[str] | None = None
+) -> None:
     paths = [
         ROOT / "archlinux" / f"{repo_name}.db",
         ROOT / "archlinux" / f"{repo_name}.files",
@@ -579,22 +649,23 @@ def commit_database(repo_name: str, packages: list[Path]) -> None:
         log("database unchanged; nothing to commit")
         return
 
-    body = "\n".join(f"- {package.name}" for package in sorted(packages, key=lambda p: p.name))
-    run(
-        [
-            "git",
-            "-c",
-            "user.name=github-actions[bot]",
-            "-c",
-            "user.email=41898282+github-actions[bot]@users.noreply.github.com",
-            "commit",
-            "--message",
-            "chore(db): update package database [skip ci]",
-            "--message",
-            body,
-        ],
-        cwd=ROOT,
-    )
+    body_lines = [
+        f"- build {package.name}" for package in sorted(packages, key=lambda p: p.name)
+    ]
+    body_lines.extend(f"- remove {name}" for name in sorted(removals or []))
+    commit_args = [
+        "git",
+        "-c",
+        "user.name=github-actions[bot]",
+        "-c",
+        "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+        "commit",
+        "--message",
+        "chore(db): update package database [skip ci]",
+    ]
+    if body_lines:
+        commit_args.extend(["--message", "\n".join(body_lines)])
+    run(commit_args, cwd=ROOT)
 
     if os.environ.get("GITHUB_ACTIONS") != "true":
         log("not running in GitHub Actions; database committed locally but not pushed")
@@ -653,57 +724,65 @@ def main(argv: list[str] | None = None) -> int:
 
     db_path = ROOT / "archlinux" / f"{repo_name}.db"
 
-    db_versions, _ = read_database(db_path)
-    targets = plan_targets(config, db_versions, args.force)
+    db_entries = read_database(db_path)
+    db_versions = database_versions(db_entries)
+    local_packages = load_local_packages()
+    targets = plan_targets(config, db_versions, args.force, local_packages)
+    removals = plan_removals(config, db_entries, local_packages)
 
-    if not targets:
+    if not targets and not removals:
         log("All packages are up to date; nothing to build.")
         return 0
 
     log("Build plan:")
     for target in targets:
-        log(f"  - {target.kind}:{target.name} {target.version}")
+        log(f"  - build {target.kind}:{target.name} {target.version}")
+    for name in removals:
+        log(f"  - remove {name}")
 
     if args.dry_run:
         return 0
 
     ensure_root()
     prepare_environment()
-    ensure_builder()
-
     WORK.mkdir(parents=True, exist_ok=True)
-    pkgs_dir = WORK / "pkgs"
-    if pkgs_dir.exists():
-        shutil.rmtree(pkgs_dir)
-    pkgs_dir.mkdir(parents=True)
 
     built: list[Path] = []
     failures: list[str] = []
 
-    for target in targets:
-        group(f"Building {target.name} {target.version}")
-        try:
-            built.extend(build_target(target, pkgs_dir, skip_pgpcheck))
-        except Exception as exc:  # noqa: BLE001 - keep building the rest
-            failures.append(f"{target.name}: {exc}")
-            error(f"failed to build {target.name}: {exc}")
-        finally:
-            endgroup()
+    if targets:
+        ensure_builder()
+        pkgs_dir = WORK / "pkgs"
+        if pkgs_dir.exists():
+            shutil.rmtree(pkgs_dir)
+        pkgs_dir.mkdir(parents=True)
 
-    if built:
-        _versions, referenced = update_database(repo_name, built, db_path)
+        for target in targets:
+            group(f"Building {target.name} {target.version}")
+            try:
+                built.extend(build_target(target, pkgs_dir, skip_pgpcheck))
+            except Exception as exc:  # noqa: BLE001 - keep building the rest
+                failures.append(f"{target.name}: {exc}")
+                error(f"failed to build {target.name}: {exc}")
+            finally:
+                endgroup()
+
+    # All or nothing: a single failed build must not change the published
+    # database or release assets. The next run retries the whole set.
+    if failures:
+        for failure in failures:
+            error(f"build failure: {failure}")
+        error("build failed; database and release assets were left untouched")
+        return 1
+
+    if built or removals:
+        new_entries = update_database(repo_name, built, removals, db_path)
+        referenced = referenced_filenames(new_entries)
         if args.no_publish:
             log("--no-publish given; skipping release upload and git push")
         else:
             publish(repo_name, tag, built, db_path, referenced)
-            commit_database(repo_name, built)
-    else:
-        error("no packages were built successfully; database left untouched")
-
-    if failures:
-        for failure in failures:
-            error(f"build failure: {failure}")
-        return 1
+            commit_database(repo_name, built, removals)
     return 0
 
 

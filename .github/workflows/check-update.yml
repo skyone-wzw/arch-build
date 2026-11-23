@@ -35,7 +35,7 @@ jobs:
         run: python scripts/check_update.py
 
       - name: Create or update pull request
-        if: steps.check.outputs.changed == 'true'
+        if: steps.check.outputs.changed == 'true' && steps.check.outputs.failed != 'true'
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

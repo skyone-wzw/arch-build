@@ -10,9 +10,6 @@ on:
       - "packages.lock"
       - "scripts/**"
       - ".github/workflows/build-packages.yml"
-  schedule:
-    # Weekly retry for packages whose build failed after an update PR merged.
-    - cron: "0 3 * * 0"
   workflow_dispatch:
     inputs:
       force:

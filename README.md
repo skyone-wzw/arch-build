@@ -13,8 +13,8 @@
 
 | 工作流 | 触发方式 | 作用 |
 | --- | --- | --- |
-| `.github/workflows/check-update.yml` | 每周定时 / 手动 | 运行本地包的 `update.sh`，通过 AUR RPC 检查外部包，有变化时创建/更新 PR |
-| `.github/workflows/build-packages.yml` | 推送到 `main`（相关路径变化）/ 每周定时重试 / 手动 | 在 `archlinux:base-devel` 容器中构建版本变化的包，上传 Release，更新并提交数据库 |
+| `.github/workflows/check-update.yml` | 每周定时 / 手动 | 运行本地包的 `update.sh`，通过 AUR RPC 检查外部包，全部检查成功且有变化时创建/更新 PR |
+| `.github/workflows/build-packages.yml` | 推送到 `main`（相关路径变化）/ 手动 | 在 `archlinux:base-devel` 容器中构建版本变化的包，上传 Release，更新并提交数据库 |
 
 整体流程：
 
@@ -71,6 +71,9 @@ local/my-package/
 版本的变化由工作流通过比较脚本执行前后的 `pkgver`/`pkgrel` 得出；如果 PKGBUILD
 被修改但版本未变，也会在 PR 中说明。
 
+只要任意一个包检查失败（`update.sh` 出错、AUR 查询失败等），本次就不会创建 PR，
+工作流会失败；修复问题后手动重新运行检查即可。
+
 ## 外部包（AUR）
 
 ```toml
@@ -113,9 +116,16 @@ https://aur.archlinux.org/rpc/v5/info?arg[]=yay-bin&arg[]=...
 3. 数据库提交回 `main` 分支（提交信息带 `[skip ci]`；工作流本身也只监听
    `local/`、`packages*.toml`、`scripts/` 等路径，不会自触发）。
 
-手动触发 **Build packages** 时可以勾选 `force`，强制重新构建所有包。该工作流每周
-还会定时运行一次：数据库与锁文件/ PKGBUILD 不一致的包（例如上次构建失败）会被
-自动重试。
+构建是「全有或全无」的：任意一个包构建失败，本次就不会更新数据库、不会上传
+Release 资产，也不会提交数据库；修复后手动重新运行 **Build packages** 即可。
+手动触发时可以勾选 `force`，强制重新构建所有包。
+
+### 移除包
+
+直接删除 `local/<name>` 目录，或从 `packages.toml` 移除 AUR 包即可（AUR 包的
+`packages.lock` 条目会由下一次更新检查清理）。构建工作流通过数据库中的 `%BASE%`
+字段识别不再由任何来源提供的包，使用 `repo-remove` 从 `<repo>.db` / `<repo>.files`
+中删除，并按新的数据库清理 Release 中不再引用的包文件。过程同样是全有或全无的。
 
 ## 首次启用
 
@@ -154,5 +164,7 @@ skip_pgpcheck = true
   `packages.toml`，并注意构建顺序（本地包先构建，AUR 包按配置顺序构建）。
 - 只构建 `x86_64`。
 - 更新检查按版本判断；AUR 维护者修改 PKGBUILD 但未提升版本时不会触发更新。
+- 移除整个包（AUR 条目/本地包目录）会自动清理；AUR 拆分包中仅上游移除某个子包时，
+  该子包不会被自动删除（本地 PKGBUILD 的子包变化可以正确清理）。
 - AUR PKGBUILD 以无 sudo 权限的普通用户身份执行，构建脚本也不会向该进程传递任何
   token；依赖由 root 在构建前安装，因此 PKGBUILD 无法提权。仍请只添加可信的 AUR 包。
