@@ -3,7 +3,7 @@
 基于 GitHub Actions 的个人 pacman 软件源。支持两类包：
 
 - **本地包**：`local/<name>/PKGBUILD`，版本由 PKGBUILD 中的 `pkgver`/`pkgrel` 决定。
-- **外部包（AUR）**：在 `packages.toml` 中声明，版本与提交哈希锁定在 `packages.lock`。
+- **外部包（AUR）**：在 `packages.toml` 中声明，版本、提交哈希（及拆分包的 `pkgbase`）锁定在 `packages.lock`。
 
 构建产物和 pacman 数据库发布在固定的 GitHub Release tag 上，因此客户端的
 `Server` 地址永远不需要修改；数据库同时以 `archlinux/<repo>.db` 的形式提交到
@@ -44,13 +44,14 @@ Server = https://github.com/<owner>/<repo>/releases/download/pacman
 ## 目录结构
 
 ```
-local/<name>/PKGBUILD    # 本地包
-local/<name>/update.sh   # 可选：版本检查脚本
-packages.toml            # AUR 包列表 + 可选仓库配置
-packages.lock            # 自动生成：AUR 包的版本与提交锁定
-scripts/check_update.py  # 更新检查
-scripts/build.py         # 构建、发布、数据库更新
-archlinux/<repo>.db      # 自动生成并提交：pacman 数据库
+local/<name>/PKGBUILD     # 本地包
+local/<name>/update.sh    # 可选：版本检查脚本
+packages.toml             # AUR 包列表 + 可选仓库/构建配置
+packages.lock             # 自动生成：AUR 包的版本、pkgbase 与提交锁定
+pyproject.toml / uv.lock  # Python 依赖与 CLI 入口（uv 管理）
+scripts/setup-builder.sh  # 构建容器工具链与 builder 用户初始化
+src/arch_build/           # 更新检查、构建规划、数据库更新与发布模块
+archlinux/<repo>.db       # 自动生成并提交：pacman 数据库
 ```
 
 ## 本地包
@@ -64,16 +65,15 @@ local/my-package/
 如果存在 `update.sh`，检查工作流会在包目录下执行它。约定：
 
 - 脚本自行下载上游元数据，并在有新版本时**原地修改 PKGBUILD**
-  （至少更新 `pkgver`、`pkgrel` 和校验和）；
+  （更新 `pkgver`、重置 `pkgrel=1` 和校验和）；
 - 没有更新时正常退出（退出码 0）；
-- 出错时以非 0 退出，工作流会报错并在 PR 描述中列出（其他包仍会继续检查）。
+- 出错时以非 0 退出。
 
-版本的变化由工作流通过比较脚本执行前后的 `pkgver`/`pkgrel` 得出；如果 PKGBUILD
-被修改但版本未变，也会在 PR 中说明。
+版本的变化由工作流通过比较脚本执行前后的 `pkgver`/`pkgrel` 得出；如果包目录下有
+文件改动但版本未变，也会照常创建 PR（构建阶段会自动跳过版本未变的包）。
 
-只要任意一个包检查失败（`update.sh` 出错、AUR 查询失败等），本次就不会创建 PR，
-工作流会失败；修复问题后手动重新运行检查即可。`check_update.py` 本身也会以非 0
-退出码结束，便于本地或其他调用方判断。
+只要任意一个包检查失败（`update.sh` 出错、AUR 查询失败等），本次不会写入
+`packages.lock` 也不会创建 PR，工作流直接失败；修复问题后手动重新运行检查即可。
 
 ## 外部包（AUR）
 
@@ -91,8 +91,13 @@ packages = [
 https://aur.archlinux.org/rpc/v5/info?arg[]=yay-bin&arg[]=...
 ```
 
-版本变化时还会用 `git ls-remote` 取得对应提交，写入 `packages.lock`。构建工作流
-按锁定的提交检出 AUR 仓库，保证可复现。`packages.lock` 由脚本生成，不要手动编辑。
+版本变化时会用 `git ls-remote` 获取对应 `PackageBase` 仓库的提交，写入
+`packages.lock`。构建工作流按锁定的提交检出 AUR 仓库，保证可复现。`packages.lock`
+由脚本生成，不要手动编辑。
+
+对于 **AUR 拆分包**，只需在 `packages.toml` 中填写任意子包名（也可同时填写多个
+子包名）：检查脚本会自动解析并记录其 `pkgbase`，构建阶段按 `pkgbase` 去重后只
+构建一次，并将产出的全部子包加入仓库。
 
 ### 新增 AUR 包的顺序
 
@@ -111,15 +116,26 @@ https://aur.archlinux.org/rpc/v5/info?arg[]=yay-bin&arg[]=...
 - 本地包：比较 PKGBUILD 的 `epoch:pkgver-pkgrel` 与数据库中的版本；
 - AUR 包：比较 `packages.lock` 中的版本与数据库中的版本；
 - 若数据库不存在（首次运行），会构建全部包；
-- 本地包的 `pkgbase` 变化时（即使包名和版本不变）会重建，以刷新数据库中的
-  `%BASE%`，而不会误判为包已移除。
+- `pkgbase` 变化时（即使包名和版本不变）会重建，以刷新数据库中的 `%BASE%`，
+  而不会误判为包已移除。
+
+构建过程细节：
+
+- `scripts/setup-builder.sh` 会在 `builder` 用户的 `~/.makepkg.conf` 中关闭默认
+  `-debug` 拆分包（`OPTIONS+=(!debug)`）；
+- 每构建完一个目标，产物会自动加入容器内的临时 pacman 仓库（且同时挂载已发布的
+  Release 仓库），因此后续包若在构建期依赖先前构建或已发布的自定义/AUR 包，会被
+  `pacman -S` 自动解析安装；
+- 包文件名中若包含 GitHub Releases 会改写的字符（如 `epoch` 的 `:` 或 `+`），
+  会在执行 `repo-add` 与上传前统一规范化为 `_`，确保数据库 `%FILENAME%` 与
+  Release 资产名完全一致。
 
 构建完成后：
 
 1. `repo-add` 合并新包，生成 `<repo>.db` / `<repo>.files`（gzip 压缩的 tar，
    pacman 会自动识别）；
-2. 包文件和数据库上传到固定 tag 的 GitHub Release（覆盖同名资产），并清理数据库
-   中不再引用的旧版本资产；
+2. 包文件（及未来可能存在的 `.sig`）和数据库上传到固定 tag 的 GitHub Release
+   （覆盖同名资产），并清理数据库中不再引用的旧版本资产；
 3. 数据库提交回 `main` 分支（提交信息带 `[skip ci]`，且由 `GITHUB_TOKEN` 推送，
    不会再次触发工作流）。
 
@@ -148,20 +164,26 @@ Release 资产，也不会提交数据库；修复后手动重新运行 **Build 
 
 ## 本地调试
 
+使用 [uv](https://docs.astral.sh/uv/) 运行命令：
+
 ```bash
 # 只打印将要构建的包，不需要 root
-python scripts/build.py --dry-run
+uv run arch-build --dry-run
 
-# 只做更新检查（会真的运行 local/*/update.sh 并改写 packages.lock）
+# 只做更新检查（会运行 local/*/update.sh，仅全部成功时改写 packages.lock）
 # 全部成功时退出码为 0，任意检查失败时为 1
-python scripts/check_update.py
+uv run arch-check-update
+
+# 运行单元测试与代码检查
+uv run pytest
+uv run ruff check .
 ```
 
 ## PGP 校验
 
 PKGBUILD 中声明了 `validpgpkeys` 时，构建脚本会先以构建用户身份从
-`keys.openpgp.org` / `keyserver.ubuntu.com` 导入对应公钥，再交给 `makepkg` 校验
-签名。若密钥无法获取且确认可以跳过，可在 `packages.toml` 中设置：
+`keys.openpgp.org` / `keyserver.ubuntu.com` 导入对应公钥（带超时控制），再交给
+`makepkg` 校验签名。若密钥无法获取且确认可以跳过，可在 `packages.toml` 中设置：
 
 ```toml
 [build]
@@ -170,8 +192,9 @@ skip_pgpcheck = true
 
 ## 已知限制
 
-- 构建环境只安装官方仓库依赖；AUR 包之间互相依赖时，需要自行把被依赖的包也加入
-  `packages.toml`，并注意构建顺序（本地包先构建，AUR 包按配置顺序构建）。
+- 仅自动解析官方源依赖，以及已加入本仓库的构建期依赖（本地包先构建，AUR 包按
+  `packages.toml` 顺序构建）；若某个 AUR 包存在运行时 AUR 依赖，请手动将该依赖也
+  加入 `packages.toml`。
 - 只构建 `x86_64`。
 - 更新检查按版本判断；AUR 维护者修改 PKGBUILD 但未提升版本时不会触发更新。
 - 移除整个包（AUR 条目/本地包目录）会自动清理；AUR 拆分包中仅上游移除某个子包时，

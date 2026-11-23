@@ -1,0 +1,35 @@
+[project]
+name = "arch-build"
+version = "0.1.0"
+description = "Automated custom pacman repository built with GitHub Actions"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "tenacity>=9.0",
+    "tomlkit>=0.13",
+]
+
+[project.scripts]
+arch-check-update = "arch_build.check_update:cli"
+arch-build = "arch_build.build:cli"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arch_build"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

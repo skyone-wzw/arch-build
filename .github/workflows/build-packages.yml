@@ -38,9 +38,9 @@ jobs:
       GITHUB_REPOSITORY: ${{ github.repository }}
 
     steps:
-      # actions/checkout needs git, which the base-devel image does not ship.
+      # actions/checkout needs git; run full system upgrade once here.
       - name: Install bootstrap tools
-        run: pacman -Syu --noconfirm --needed --noprogressbar git python
+        run: pacman -Syu --noconfirm --needed --noprogressbar git
 
       - name: Checkout main
         uses: actions/checkout@v6
@@ -53,12 +53,15 @@ jobs:
           # this workspace. The database commit authenticates explicitly.
           persist-credentials: false
 
+      - name: Setup build environment
+        run: bash scripts/setup-builder.sh
+
       - name: Build and publish packages
         env:
           FORCE_REBUILD: ${{ github.event.inputs.force }}
         run: |
           if [[ "${FORCE_REBUILD}" == "true" ]]; then
-            python scripts/build.py --force
+            uv run --frozen arch-build --force
           else
-            python scripts/build.py
+            uv run --frozen arch-build
           fi

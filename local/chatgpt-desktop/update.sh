@@ -26,10 +26,12 @@ fi
 
 sed -i -E \
   -e "s/^pkgver=.*/pkgver=${new_ver}/" \
+  -e "s/^pkgrel=.*/pkgrel=1/" \
   -e "/^sha256sums=\(/,/^\)/ s/'[0-9a-f]{64}'/'${new_sha}'/" \
   "$PKGBUILD"
 
 grep -q "^pkgver=${new_ver}$" "$PKGBUILD"
+grep -q "^pkgrel=1$" "$PKGBUILD"
 grep -q "'${new_sha}'" "$PKGBUILD"
 
 log "Updated: ${new_ver} (${new_sha})"
