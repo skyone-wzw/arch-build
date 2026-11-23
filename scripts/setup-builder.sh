@@ -9,7 +9,10 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 # Enable official [multilib] repository so lib32-* build dependencies resolve.
-sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
+# The container image may omit or comment out [multilib], so append if inactive.
+if ! grep -qxF '[multilib]' /etc/pacman.conf; then
+  printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf
+fi
 
 pacman -Syu --noconfirm --needed --noprogressbar --asdeps \
   base-devel \
