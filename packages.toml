@@ -1,0 +1,21 @@
+# External packages maintained by this repository.
+# Local packages are discovered automatically from local/<name>/PKGBUILD.
+[aur]
+packages = [
+    "cc-switch-bin",
+    "hmcl-bin",
+    "localsend-bin",
+    "visual-studio-code-bin",
+    "yay-bin",
+    "yubico-authenticator-bin",
+]
+
+# Optional: pacman repository name and the fixed GitHub release tag used as
+# the download URL. The database is published as archlinux/<name>.db.
+# [repo]
+# name = "arch-build"   # defaults to the GitHub repository name
+# tag = "pacman"
+
+# Optional build settings.
+# [build]
+# skip_pgpcheck = false  # set to true to build despite unavailable PGP keys

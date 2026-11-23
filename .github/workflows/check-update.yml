@@ -1,0 +1,59 @@
+name: Check package updates
+
+on:
+  schedule:
+    # Every Friday at 21:00 UTC (Saturday 05:00 in UTC+8).
+    - cron: "0 21 * * 5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: check-package-updates
+  cancel-in-progress: false
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Check local and AUR packages
+        id: check
+        run: python scripts/check_update.py
+
+      - name: Create or update pull request
+        if: steps.check.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: automated/update-packages
+          delete-branch: true
+          commit-message: "chore: update package versions"
+          title: "chore: update package versions"
+          body: |
+            ${{ steps.check.outputs.summary }}
+
+            ---
+            Created automatically by `.github/workflows/check-update.yml`.
+            Merging this pull request triggers `.github/workflows/build-packages.yml`.
+          add-paths: |
+            packages.lock
+            local
+
+      - name: Fail if any update check failed
+        if: steps.check.outputs.failed == 'true'
+        run: exit 1
