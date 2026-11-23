@@ -6,7 +6,10 @@ present) and comparing the PKGBUILD version before/after.  External packages
 are resolved through the AUR RPC and pinned in ``packages.lock``.
 
 The script only touches the working tree; creating the pull request is left to
-the workflow.  Step outputs:
+the workflow.  It exits non-zero when any update check failed, and a failed run
+is expected to be discarded (no pull request).
+
+Step outputs:
 
 ``changed``  -- "true" when the working tree contains something to commit
 ``failed``   -- "true" when at least one update check failed
@@ -254,9 +257,12 @@ def main() -> int:
     set_output("summary", body)
     add_step_summary(body)
 
-    for failure in failures:
-        error(f"update check failed: {failure}")
-
+    if failures:
+        for failure in failures:
+            error(f"update check failed: {failure}")
+        # Fail the command as well; the workflow also gates PR creation on
+        # the "failed" output, and a failed run is discarded entirely.
+        return 1
     return 0
 
 

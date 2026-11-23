@@ -14,7 +14,7 @@
 | 工作流 | 触发方式 | 作用 |
 | --- | --- | --- |
 | `.github/workflows/check-update.yml` | 每周定时 / 手动 | 运行本地包的 `update.sh`，通过 AUR RPC 检查外部包，全部检查成功且有变化时创建/更新 PR |
-| `.github/workflows/build-packages.yml` | 推送到 `main`（相关路径变化）/ 手动 | 在 `archlinux:base-devel` 容器中构建版本变化的包，上传 Release，更新并提交数据库 |
+| `.github/workflows/build-packages.yml` | 合并 `automated/update-packages` PR / 手动 | 在 `archlinux:base-devel` 容器中构建版本变化的包，上传 Release，更新并提交数据库 |
 
 整体流程：
 
@@ -72,7 +72,8 @@ local/my-package/
 被修改但版本未变，也会在 PR 中说明。
 
 只要任意一个包检查失败（`update.sh` 出错、AUR 查询失败等），本次就不会创建 PR，
-工作流会失败；修复问题后手动重新运行检查即可。
+工作流会失败；修复问题后手动重新运行检查即可。`check_update.py` 本身也会以非 0
+退出码结束，便于本地或其他调用方判断。
 
 ## 外部包（AUR）
 
@@ -97,15 +98,21 @@ https://aur.archlinux.org/rpc/v5/info?arg[]=yay-bin&arg[]=...
 
 1. 编辑 `packages.toml`；
 2. 手动运行一次 **Check package updates** 工作流（或等待每周计划任务）；
-3. 合并生成的 PR，推送会触发构建，并自动补上 `packages.lock` 条目。
+3. 合并生成的 PR 会触发构建，并自动补上 `packages.lock` 条目。
 
 ## 构建与发布
+
+构建会写入 Release 和数据库，因此除了手动触发外，只会在
+`automated/update-packages` 的 PR 合并后自动运行。其他改动（手动修改 PKGBUILD、
+删除包等）需要手动运行 **Build packages**。
 
 构建工作流只构建数据库中版本不一致的包：
 
 - 本地包：比较 PKGBUILD 的 `epoch:pkgver-pkgrel` 与数据库中的版本；
 - AUR 包：比较 `packages.lock` 中的版本与数据库中的版本；
-- 若数据库不存在（首次运行），会构建全部包。
+- 若数据库不存在（首次运行），会构建全部包；
+- 本地包的 `pkgbase` 变化时（即使包名和版本不变）会重建，以刷新数据库中的
+  `%BASE%`，而不会误判为包已移除。
 
 构建完成后：
 
@@ -113,8 +120,8 @@ https://aur.archlinux.org/rpc/v5/info?arg[]=yay-bin&arg[]=...
    pacman 会自动识别）；
 2. 包文件和数据库上传到固定 tag 的 GitHub Release（覆盖同名资产），并清理数据库
    中不再引用的旧版本资产；
-3. 数据库提交回 `main` 分支（提交信息带 `[skip ci]`；工作流本身也只监听
-   `local/`、`packages*.toml`、`scripts/` 等路径，不会自触发）。
+3. 数据库提交回 `main` 分支（提交信息带 `[skip ci]`，且由 `GITHUB_TOKEN` 推送，
+   不会再次触发工作流）。
 
 构建是「全有或全无」的：任意一个包构建失败，本次就不会更新数据库、不会上传
 Release 资产，也不会提交数据库；修复后手动重新运行 **Build packages** 即可。
@@ -123,9 +130,10 @@ Release 资产，也不会提交数据库；修复后手动重新运行 **Build 
 ### 移除包
 
 直接删除 `local/<name>` 目录，或从 `packages.toml` 移除 AUR 包即可（AUR 包的
-`packages.lock` 条目会由下一次更新检查清理）。构建工作流通过数据库中的 `%BASE%`
-字段识别不再由任何来源提供的包，使用 `repo-remove` 从 `<repo>.db` / `<repo>.files`
-中删除，并按新的数据库清理 Release 中不再引用的包文件。过程同样是全有或全无的。
+`packages.lock` 条目会由下一次更新检查清理）。删除操作不会自动触发构建，需要手动
+运行 **Build packages**。构建工作流通过数据库中的 `%BASE%` 字段识别不再由任何来源
+提供的包，使用 `repo-remove` 从 `<repo>.db` / `<repo>.files` 中删除，并按新的数据库
+清理 Release 中不再引用的包文件。过程同样是全有或全无的。
 
 ## 首次启用
 
@@ -135,7 +143,8 @@ Release 资产，也不会提交数据库；修复后手动重新运行 **Build 
    （创建更新 PR 需要）；
 3. 若 `main` 启用了分支保护，需要允许 `github-actions[bot]` 直接推送数据库提交，
    或放宽对 `archlinux/**` 的限制；
-4. 首次合并后构建工作流会创建 `pacman` Release 并构建所有包。之后客户端即可使用。
+4. 初始推送后手动运行一次 **Build packages**：它会创建 `pacman` Release 并构建
+   所有包。之后客户端即可使用。
 
 ## 本地调试
 
@@ -144,6 +153,7 @@ Release 资产，也不会提交数据库；修复后手动重新运行 **Build 
 python scripts/build.py --dry-run
 
 # 只做更新检查（会真的运行 local/*/update.sh 并改写 packages.lock）
+# 全部成功时退出码为 0，任意检查失败时为 1
 python scripts/check_update.py
 ```
 

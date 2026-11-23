@@ -1,15 +1,12 @@
 name: Build packages
 
 on:
-  push:
+  # Publishing is a write operation, so it only runs automatically when the
+  # automated update pull request is merged. Everything else is manual.
+  pull_request:
+    types: [closed]
     branches:
       - main
-    paths:
-      - "local/**"
-      - "packages.toml"
-      - "packages.lock"
-      - "scripts/**"
-      - ".github/workflows/build-packages.yml"
   workflow_dispatch:
     inputs:
       force:
@@ -26,6 +23,10 @@ concurrency:
 
 jobs:
   build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.head.ref == 'automated/update-packages')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     container:
@@ -41,9 +42,12 @@ jobs:
       - name: Install bootstrap tools
         run: pacman -Syu --noconfirm --needed --noprogressbar git python
 
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v6
         with:
+          # For pull_request events check out the base branch (after merge),
+          # never the PR merge ref.
+          ref: main
           fetch-depth: 0
           # Keep the token out of .git/config: untrusted PKGBUILD code runs in
           # this workspace. The database commit authenticates explicitly.

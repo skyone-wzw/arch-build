@@ -123,10 +123,6 @@ def read_database(path: Path) -> dict[str, DbEntry]:
     return entries
 
 
-def database_versions(entries: dict[str, DbEntry]) -> dict[str, str]:
-    return {name: entry.version for name, entry in entries.items()}
-
-
 def referenced_filenames(entries: dict[str, DbEntry]) -> set[str]:
     return {entry.filename for entry in entries.values() if entry.filename}
 
@@ -141,17 +137,24 @@ def load_local_packages() -> list[tuple[Path, dict]]:
 
 def plan_targets(
     config: dict,
-    db_versions: dict[str, str],
+    db_entries: dict[str, DbEntry],
     force: bool,
     local_packages: list[tuple[Path, dict]],
 ) -> list[Target]:
     targets: list[Target] = []
 
     for pkg_dir, info in local_packages:
-        outdated = force or any(
-            db_versions.get(name) != info["version"] for name in info["pkgname"]
+        version_changed = any(
+            name not in db_entries or db_entries[name].version != info["version"]
+            for name in info["pkgname"]
         )
-        if outdated:
+        # A renamed pkgbase must be reflected in the database even when the
+        # package names and versions are unchanged.
+        base_changed = any(
+            name in db_entries and db_entries[name].base != info["pkgbase"]
+            for name in info["pkgname"]
+        )
+        if force or version_changed or base_changed:
             targets.append(
                 Target(
                     kind="local",
@@ -171,7 +174,9 @@ def plan_targets(
                 "run the update check workflow first"
             )
             continue
-        outdated = force or db_versions.get(name) != entry["version"]
+        outdated = force or (
+            name not in db_entries or db_entries[name].version != entry["version"]
+        )
         if outdated:
             targets.append(
                 Target(
@@ -201,12 +206,13 @@ def plan_removals(
     local_names = {name for _, info in local_packages for name in info["pkgname"]}
     aur_names = set(aur_package_names(config))
 
-    desired_bases = local_bases | aur_names
-    # A configured name may be a split-package member whose base differs.
+    # Bases owned by a configured AUR source. A configured name is normally
+    # the pkgbase; when it is a split-package member, resolve its base.
+    aur_bases = set(aur_names)
     for name in aur_names:
         entry = db_entries.get(name)
         if entry:
-            desired_bases.add(entry.base)
+            aur_bases.add(entry.base)
 
     removals: list[str] = []
     for name, entry in db_entries.items():
@@ -215,7 +221,13 @@ def plan_removals(
             # Local split packages are known exactly; drop removed members.
             if name not in local_names:
                 removals.append(name)
-        elif base not in desired_bases:
+        elif base in aur_bases:
+            continue
+        elif name in local_names:
+            # The package is still produced by a local source whose pkgbase
+            # changed; plan_targets rebuilds it instead of removing it.
+            continue
+        else:
             removals.append(name)
     return sorted(removals)
 
@@ -725,9 +737,8 @@ def main(argv: list[str] | None = None) -> int:
     db_path = ROOT / "archlinux" / f"{repo_name}.db"
 
     db_entries = read_database(db_path)
-    db_versions = database_versions(db_entries)
     local_packages = load_local_packages()
-    targets = plan_targets(config, db_versions, args.force, local_packages)
+    targets = plan_targets(config, db_entries, args.force, local_packages)
     removals = plan_removals(config, db_entries, local_packages)
 
     if not targets and not removals:
