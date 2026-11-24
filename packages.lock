@@ -10,6 +10,12 @@ version = "4.0.39-1"
 commit = "b5040049ffd54786b56fffd0f8a6ef28b9e37bdc"
 
 [[package]]
+name = "esp-idf"
+source = "aur"
+version = "6.1.1-1"
+commit = "45d67e48358a01517b230ba16073157e3e1f9e2e"
+
+[[package]]
 name = "hmcl-bin"
 source = "aur"
 version = "3.17.2-1"

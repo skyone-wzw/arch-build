@@ -5,6 +5,7 @@ packages = [
     "cc-switch-bin",
     "hmcl-bin",
     "localsend-bin",
+    "esp-idf",
     "visual-studio-code-bin",
     "yay-bin",
     "yubico-authenticator-bin",
