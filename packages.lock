@@ -24,14 +24,14 @@ commit = "35d0db53c25892c34feeb0471771412be83f03ae"
 [[package]]
 name = "localsend-bin"
 source = "aur"
-version = "1.18.2-2"
-commit = "f35ec0d6bd56c3c9fc4611f91972c31c38210654"
+version = "1.19.0-2"
+commit = "c5a8b546e3325afdec83f9ec7f16765112d2842f"
 
 [[package]]
 name = "visual-studio-code-bin"
 source = "aur"
-version = "1.147.0-1"
-commit = "2e0372fb14fbc1b39b655e6f324bbd758c9c1c66"
+version = "1.148.0-1"
+commit = "8eef944c1cedcdf7590bb66f91ceb3cbb4628a34"
 
 [[package]]
 name = "wayvr-bin"
