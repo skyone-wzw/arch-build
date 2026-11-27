@@ -1,4 +1,4 @@
-"""GitHub Release asset publishing and database git commits."""
+"""GitHub Release reconciliation, asset publishing, and database git commits."""
 
 from __future__ import annotations
 
@@ -6,11 +6,29 @@ import base64
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
-from arch_build import ROOT, run_cmd
+import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from arch_build import ROOT, USER_AGENT, run_cmd
 from arch_build.gha import log, warning
-from arch_build.pacman import PACKAGE_ASSET_RE, BuiltPackage
+from arch_build.pacman import BuiltPackage, DbEntry, file_sha256, referenced_filenames
+
+GITHUB_API = "https://api.github.com"
+
+
+@dataclass(frozen=True)
+class ReleaseState:
+    exists: bool
+    assets: dict[str, str | None]  # asset filename -> lowercase sha256 hex (or None)
+
+
+@dataclass(frozen=True)
+class ReleaseDiff:
+    missing_or_corrupt_packages: set[str]
+    stale_assets: list[str]
 
 
 def ensure_safe_directory(root: Path = ROOT) -> None:
@@ -35,6 +53,136 @@ def github_slug(root: Path = ROOT) -> str | None:
     )
     match = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", proc.stdout.strip())
     return match.group(1) if match else None
+
+
+def _github_headers() -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _parse_sha256_digest(digest: str | None) -> str | None:
+    if not digest or not digest.startswith("sha256:"):
+        return None
+    return digest.removeprefix("sha256:").lower()
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2),
+    retry=retry_if_exception_type(httpx.HTTPError),
+    reraise=True,
+)
+def fetch_release_state(slug: str, tag: str) -> ReleaseState:
+    """Fetch all release asset names and SHA256 digests via the GitHub REST API."""
+    with httpx.Client(headers=_github_headers(), timeout=30.0, follow_redirects=True) as client:
+        resp = client.get(f"{GITHUB_API}/repos/{slug}/releases/tags/{tag}")
+        if resp.status_code == 404:
+            return ReleaseState(exists=False, assets={})
+        resp.raise_for_status()
+        release_id = resp.json()["id"]
+
+        assets: dict[str, str | None] = {}
+        next_url: str | None = (
+            f"{GITHUB_API}/repos/{slug}/releases/{release_id}/assets?per_page=100"
+        )
+        while next_url:
+            page = client.get(next_url)
+            page.raise_for_status()
+            for item in page.json():
+                assets[item["name"]] = _parse_sha256_digest(item.get("digest"))
+            next_link = page.links.get("next")
+            next_url = next_link["url"] if next_link else None
+
+    return ReleaseState(exists=True, assets=assets)
+
+
+def find_stale_assets(
+    release_assets: dict[str, str | None], referenced: set[str], repo_name: str
+) -> list[str]:
+    """Return every asset outside the strict whitelist of DB-referenced files and DB files."""
+    keep = set(referenced) | {f"{repo_name}.db", f"{repo_name}.files"}
+    return sorted(
+        asset
+        for asset in release_assets
+        if not (asset in keep or (asset.endswith(".sig") and asset[:-4] in keep))
+    )
+
+
+def verify_release(
+    repo_name: str,
+    db_path: Path,
+    db_entries: dict[str, DbEntry],
+    release: ReleaseState,
+) -> ReleaseDiff:
+    """Verify local DB matches Release DB (fatal on mismatch), then diff Release package assets."""
+    files_path = db_path.parent / f"{repo_name}.files"
+    db_asset = f"{repo_name}.db"
+    files_asset = f"{repo_name}.files"
+    local_db_exists = db_path.is_file()
+    local_files_exists = files_path.is_file()
+    remote_db_exists = db_asset in release.assets
+    remote_files_exists = files_asset in release.assets
+
+    if not local_db_exists and not local_files_exists:
+        if remote_db_exists or remote_files_exists:
+            raise RuntimeError(
+                f"local database ({db_asset}/{files_asset}) is missing, "
+                "but the GitHub Release already contains database files. "
+                "Inspect the mismatch and run with --force to rebuild and reset the release."
+            )
+        return ReleaseDiff(
+            missing_or_corrupt_packages=set(),
+            stale_assets=sorted(release.assets),
+        )
+
+    db_errors: list[str] = []
+    if not local_db_exists:
+        db_errors.append(f"local {db_asset} is missing while {files_asset} exists")
+    if not local_files_exists:
+        db_errors.append(f"local {files_asset} is missing while {db_asset} exists")
+    if not release.exists:
+        db_errors.append("GitHub Release tag does not exist while local database is present")
+    else:
+        for local_path, asset_name in ((db_path, db_asset), (files_path, files_asset)):
+            if not local_path.is_file():
+                continue
+            local_hash = file_sha256(local_path)
+            if asset_name not in release.assets:
+                db_errors.append(f"{asset_name}: missing from release (local sha256={local_hash})")
+            else:
+                remote_hash = release.assets[asset_name]
+                if remote_hash != local_hash:
+                    db_errors.append(
+                        f"{asset_name}: sha256 mismatch "
+                        f"(local={local_hash}, release={remote_hash or 'unavailable'})"
+                    )
+
+    if db_errors:
+        details = "\n  - ".join(db_errors)
+        raise RuntimeError(
+            "repository database and GitHub Release database are out of sync:\n"
+            f"  - {details}\n"
+            "Inspect the cause and run with --force to rebuild and reset the release."
+        )
+
+    missing_or_corrupt: set[str] = set()
+    for name, entry in db_entries.items():
+        if not entry.filename or entry.filename not in release.assets:
+            missing_or_corrupt.add(name)
+            continue
+        remote_hash = release.assets[entry.filename]
+        if entry.sha256 and remote_hash != entry.sha256:
+            missing_or_corrupt.add(name)
+
+    stale = find_stale_assets(release.assets, referenced_filenames(db_entries), repo_name)
+    return ReleaseDiff(missing_or_corrupt_packages=missing_or_corrupt, stale_assets=stale)
 
 
 def _gh(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
@@ -63,36 +211,26 @@ def _ensure_release(slug: str, tag: str) -> None:
         raise RuntimeError(f"cannot create release {tag}: {proc.stderr.strip()}")
 
 
-def _prune_old_assets(slug: str, tag: str, referenced: set[str], repo_name: str) -> None:
-    proc = _gh(
-        "release",
-        "view",
-        tag,
-        "--repo",
-        slug,
-        "--json",
-        "assets",
-        "--jq",
-        ".assets[].name",
-        capture=True,
-    )
-    if proc.returncode != 0:
-        warning(f"cannot list release assets for pruning: {proc.stderr.strip()}")
-        return
-
-    keep = set(referenced) | {f"{repo_name}.db", f"{repo_name}.files"}
-    for raw_asset in proc.stdout.splitlines():
-        asset = raw_asset.strip()
-        if not PACKAGE_ASSET_RE.search(asset):
-            continue
-        if asset in keep or (asset.endswith(".sig") and asset[:-4] in keep):
-            continue
+def prune_assets(slug: str, tag: str, assets: list[str]) -> None:
+    for asset in assets:
         log(f"pruning stale asset {asset}")
         deletion = _gh(
             "release", "delete-asset", tag, asset, "--yes", "--repo", slug, capture=True
         )
         if deletion.returncode != 0:
             warning(f"cannot delete stale asset {asset}: {deletion.stderr.strip()}")
+
+
+def _prune_old_assets(slug: str, tag: str, referenced: set[str], repo_name: str) -> None:
+    try:
+        release = fetch_release_state(slug, tag)
+    except httpx.HTTPError as exc:
+        warning(f"cannot list release assets for pruning: {exc}")
+        return
+    if not release.exists:
+        return
+    stale = find_stale_assets(release.assets, referenced, repo_name)
+    prune_assets(slug, tag, stale)
 
 
 def publish(

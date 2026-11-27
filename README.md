@@ -135,13 +135,26 @@ https://aur.archlinux.org/rpc/v5/info?arg[]=yay-bin&arg[]=...
 1. `repo-add` 合并新包，生成 `<repo>.db` / `<repo>.files`（gzip 压缩的 tar，
    pacman 会自动识别）；
 2. 包文件（及未来可能存在的 `.sig`）和数据库上传到固定 tag 的 GitHub Release
-   （覆盖同名资产），并清理数据库中不再引用的旧版本资产；
+   （覆盖同名资产），并按严格白名单清理 Release 中不在数据库内的全部多余资产；
 3. 数据库提交回 `main` 分支（提交信息带 `[skip ci]`，且由 `GITHUB_TOKEN` 推送，
    不会再次触发工作流）。
 
+### Release 一致性校验与修复
+
+数据流严格单向：`packages.lock` / `local/*` → 仓库内 `archlinux/<repo>.{db,files}` →
+GitHub Release。每次构建前（非 `--force` / `--no-publish`）会通过 GitHub API 的
+资产 SHA256 `digest` 做两级校验：
+
+1. **仓库内 db 与 Release db 不一致**（缺失或 SHA256 不匹配）：视为严重异常，立即
+   中止构建并输出差异，便于人工排查；确认原因后手动触发带 `force` 的构建，会从
+   空白数据库全量重编并清空 Release 中的所有旧文件。
+2. **Release db 与 Release 资产列表不一致**：自动恢复——对比数据库中每个包的
+   `%FILENAME%` 与 `%SHA256SUM%`，缺失或哈希不匹配的包会自动加入本次构建计划，
+   不在白名单内的多余文件会自动清理（即使没有版本更新也会执行清理）。
+
 构建是「全有或全无」的：任意一个包构建失败，本次就不会更新数据库、不会上传
 Release 资产，也不会提交数据库；修复后手动重新运行 **Build packages** 即可。
-手动触发时可以勾选 `force`，强制重新构建所有包。
+手动触发时可以勾选 `force`，从空白数据库强制全量重编并重置 Release。
 
 ### 移除包
 
@@ -167,8 +180,9 @@ Release 资产，也不会提交数据库；修复后手动重新运行 **Build 
 使用 [uv](https://docs.astral.sh/uv/) 运行命令：
 
 ```bash
-# 只打印将要构建的包，不需要 root
+# 只打印构建与 Release 对账计划，不需要 root（离线调试可加 --no-publish）
 uv run arch-build --dry-run
+uv run arch-build --dry-run --no-publish
 
 # 只做更新检查（会运行 local/*/update.sh，仅全部成功时改写 packages.lock）
 # 全部成功时退出码为 0，任意检查失败时为 1

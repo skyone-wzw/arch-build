@@ -16,12 +16,15 @@ from arch_build.config import Config, LockEntry, load_config, read_lock, render_
 from arch_build.pacman import (
     DbEntry,
     collect_built_packages,
+    file_sha256,
     parse_desc,
     parse_srcinfo,
     read_database,
     sanitize_asset_name,
+    update_database,
 )
 from arch_build.pkgbuild import PkgbuildInfo, full_version, read_pkgbuild
+from arch_build.publish import ReleaseState, find_stale_assets, verify_release
 
 
 def test_config_validation_and_duplicates(tmp_path: Path) -> None:
@@ -81,7 +84,13 @@ def test_full_version_and_read_pkgbuild(tmp_path: Path) -> None:
 
 
 def test_read_database_and_parse_desc(tmp_path: Path) -> None:
-    desc = "%FILENAME%\nfoo-1_2.0-1-x86_64.pkg.tar.zst\n\n%NAME%\nfoo\n\n%BASE%\nfoo-base\n\n%VERSION%\n1:2.0-1\n"
+    desc = (
+        "%FILENAME%\nfoo-1_2.0-1-x86_64.pkg.tar.zst\n\n"
+        "%NAME%\nfoo\n\n"
+        "%BASE%\nfoo-base\n\n"
+        "%VERSION%\n1:2.0-1\n\n"
+        "%SHA256SUM%\nABCDEF0123456789\n"
+    )
     parsed = parse_desc(desc)
     assert parsed["NAME"] == "foo"
     assert parsed["BASE"] == "foo-base"
@@ -96,7 +105,11 @@ def test_read_database_and_parse_desc(tmp_path: Path) -> None:
 
     entries = read_database(db_path)
     assert entries["foo"] == DbEntry(
-        name="foo", base="foo-base", version="1:2.0-1", filename="foo-1_2.0-1-x86_64.pkg.tar.zst"
+        name="foo",
+        base="foo-base",
+        version="1:2.0-1",
+        filename="foo-1_2.0-1-x86_64.pkg.tar.zst",
+        sha256="abcdef0123456789",
     )
 
 
@@ -223,3 +236,118 @@ def test_staging_repo_pacman_conf_order(tmp_path: Path) -> None:
         repo._sync_pacman_conf()
         updated = conf.read_text(encoding="utf-8")
         assert updated.index("[arch-build-stage]") < updated.index("[arch-build]")
+
+
+def test_verify_release_db_mismatch_is_fatal(tmp_path: Path) -> None:
+    db_path = tmp_path / "repo.db"
+    files_path = tmp_path / "repo.files"
+    db_path.write_bytes(b"db-bytes")
+    files_path.write_bytes(b"files-bytes")
+
+    # Release missing altogether while local DB exists -> fatal
+    with pytest.raises(RuntimeError, match="out of sync"):
+        verify_release("repo", db_path, {}, ReleaseState(exists=False, assets={}))
+
+    # Release DB hash differs -> fatal
+    release = ReleaseState(
+        exists=True,
+        assets={"repo.db": "0" * 64, "repo.files": file_sha256(files_path)},
+    )
+    with pytest.raises(RuntimeError, match="sha256 mismatch"):
+        verify_release("repo", db_path, {}, release)
+
+    # Local DB missing while Release already has DB -> fatal
+    db_path.unlink()
+    files_path.unlink()
+    with pytest.raises(RuntimeError, match="local database"):
+        verify_release("repo", db_path, {}, release)
+
+
+def test_verify_release_reconciles_missing_corrupt_and_stale(tmp_path: Path) -> None:
+    db_path = tmp_path / "repo.db"
+    files_path = tmp_path / "repo.files"
+    db_path.write_bytes(b"db-bytes")
+    files_path.write_bytes(b"files-bytes")
+
+    db_entries = {
+        "ok-pkg": DbEntry("ok-pkg", "ok-pkg", "1.0-1", "ok-pkg-1.0-1.pkg.tar.zst", "aaa"),
+        "missing-pkg": DbEntry(
+            "missing-pkg", "missing-pkg", "1.0-1", "missing-pkg-1.0-1.pkg.tar.zst", "bbb"
+        ),
+        "corrupt-pkg": DbEntry(
+            "corrupt-pkg", "corrupt-pkg", "1.0-1", "corrupt-pkg-1.0-1.pkg.tar.zst", "ccc"
+        ),
+        "split-sub": DbEntry(
+            "split-sub", "split-base", "1.0-1", "split-sub-1.0-1.pkg.tar.zst", "ddd"
+        ),
+    }
+    release = ReleaseState(
+        exists=True,
+        assets={
+            "repo.db": file_sha256(db_path),
+            "repo.files": file_sha256(files_path),
+            "ok-pkg-1.0-1.pkg.tar.zst": "aaa",
+            "corrupt-pkg-1.0-1.pkg.tar.zst": "wronghash",
+            "old-pkg-0.9-1.pkg.tar.zst": "eee",
+            "unexpected-note.txt": "fff",
+        },
+    )
+
+    diff = verify_release("repo", db_path, db_entries, release)
+    assert diff.missing_or_corrupt_packages == {"missing-pkg", "corrupt-pkg", "split-sub"}
+    assert diff.stale_assets == ["old-pkg-0.9-1.pkg.tar.zst", "unexpected-note.txt"]
+
+    # Split subpackage (unlisted in packages.toml) being missing still triggers pkgbase rebuild.
+    cfg = Config.model_validate(
+        {"aur": {"packages": ["ok-pkg", "missing-pkg", "corrupt-pkg", "split-main"]}}
+    )
+    lock = {
+        "ok-pkg": LockEntry(name="ok-pkg", version="1.0-1", commit="c1"),
+        "missing-pkg": LockEntry(name="missing-pkg", version="1.0-1", commit="c2"),
+        "corrupt-pkg": LockEntry(name="corrupt-pkg", version="1.0-1", commit="c3"),
+        "split-main": LockEntry(name="split-main", pkgbase="split-base", version="1.0-1", commit="c4"),
+    }
+    db_with_main = {
+        **db_entries,
+        "split-main": DbEntry(
+            "split-main", "split-base", "1.0-1", "split-main-1.0-1.pkg.tar.zst", "ggg"
+        ),
+    }
+    targets = plan_targets(
+        cfg,
+        db_with_main,
+        force=False,
+        local_packages=[],
+        lock=lock,
+        repair_packages=diff.missing_or_corrupt_packages,
+    )
+    assert [t.name for t in targets] == ["missing-pkg", "corrupt-pkg", "split-base"]
+
+
+def test_find_stale_assets_strict_whitelist() -> None:
+    assets: dict[str, str | None] = {
+        "repo.db": "1",
+        "repo.files": "2",
+        "repo.db.sig": "3",
+        "foo-1.0.pkg.tar.zst": "4",
+        "foo-1.0.pkg.tar.zst.sig": "5",
+        "old-repo.db": "6",
+        "orphan.sig": "7",
+        "random.txt": "8",
+    }
+    assert find_stale_assets(assets, {"foo-1.0.pkg.tar.zst"}, "repo") == [
+        "old-repo.db",
+        "orphan.sig",
+        "random.txt",
+    ]
+
+
+def test_update_database_fresh_empty(tmp_path: Path) -> None:
+    db_path = tmp_path / "archlinux" / "repo.db"
+    db_path.parent.mkdir()
+    db_path.write_bytes(b"corrupt")
+
+    entries = update_database("repo", [], ["old"], db_path, tmp_path / "work", fresh=True)
+    assert entries == {}
+    assert db_path.is_file()
+    assert (db_path.parent / "repo.files").is_file()

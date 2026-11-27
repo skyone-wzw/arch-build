@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import tarfile
@@ -12,7 +13,6 @@ from arch_build import run_cmd
 from arch_build.gha import log
 
 PACKAGE_ARCHIVE_RE = re.compile(r"\.pkg\.tar\.(?:zst|xz|gz|bz2|lz4|lzo|lz|Z)$")
-PACKAGE_ASSET_RE = re.compile(r"\.pkg\.tar\.(?:zst|xz|gz|bz2|lz4|lzo|lz|Z)(?:\.sig)?$")
 _GITHUB_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -22,6 +22,11 @@ class DbEntry:
     base: str
     version: str
     filename: str = ""
+    sha256: str = ""
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,7 @@ def read_database(path: Path) -> dict[str, DbEntry]:
                 base=desc.get("BASE") or name,
                 version=desc.get("VERSION", ""),
                 filename=desc.get("FILENAME", ""),
+                sha256=desc.get("SHA256SUM", "").lower(),
             )
     return entries
 
@@ -149,6 +155,8 @@ def update_database(
     removals: list[str],
     db_path: Path,
     work_dir: Path,
+    *,
+    fresh: bool = False,
 ) -> dict[str, DbEntry]:
     staging = work_dir / "repo"
     if staging.exists():
@@ -157,21 +165,27 @@ def update_database(
 
     arch_dir = db_path.parent
     work_db = staging / f"{repo_name}.db.tar.gz"
-    if db_path.is_file():
-        shutil.copy2(db_path, work_db)
-    existing_files = arch_dir / f"{repo_name}.files"
-    if existing_files.is_file():
-        shutil.copy2(existing_files, staging / f"{repo_name}.files.tar.gz")
+    work_files = staging / f"{repo_name}.files.tar.gz"
+    if not fresh:
+        if db_path.is_file():
+            shutil.copy2(db_path, work_db)
+        existing_files = arch_dir / f"{repo_name}.files"
+        if existing_files.is_file():
+            shutil.copy2(existing_files, work_files)
+        if removals:
+            run_cmd(["repo-remove", "--quiet", work_db, *removals])
 
-    if removals:
-        run_cmd(["repo-remove", "--quiet", work_db, *removals])
     if packages:
         run_cmd(["repo-add", "--quiet", work_db, *(pkg.archive for pkg in packages)])
+    elif fresh:
+        # Empty valid gzipped tars when rebuilding an empty repository from scratch.
+        for empty_archive in (work_db, work_files):
+            with tarfile.open(empty_archive, "w:gz"):
+                pass
 
     arch_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(work_db, db_path)
 
-    work_files = staging / f"{repo_name}.files.tar.gz"
     if work_files.is_file():
         shutil.copy2(work_files, arch_dir / f"{repo_name}.files")
 

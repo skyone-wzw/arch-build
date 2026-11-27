@@ -61,7 +61,9 @@ def plan_targets(
     force: bool,
     local_packages: list[tuple[Path, PkgbuildInfo]],
     lock: dict[str, LockEntry],
+    repair_packages: set[str] | None = None,
 ) -> list[Target]:
+    repair = repair_packages or set()
     targets: list[Target] = []
 
     for pkg_dir, info in local_packages:
@@ -74,7 +76,8 @@ def plan_targets(
             name in db_entries and db_entries[name].base != info.pkgbase
             for name in info.pkgname
         )
-        if force or version_changed or base_changed:
+        needs_repair = any(name in repair for name in info.pkgname)
+        if force or version_changed or base_changed or needs_repair:
             targets.append(
                 Target(
                     kind="local",
@@ -98,11 +101,17 @@ def plan_targets(
         aur_groups.setdefault(entry.effective_pkgbase, []).append(entry)
 
     for pkgbase, entries in aur_groups.items():
-        needs_build = force or any(
-            entry.name not in db_entries
-            or db_entries[entry.name].version != entry.version
-            or db_entries[entry.name].base != pkgbase
-            for entry in entries
+        # Include every DB subpackage sharing this pkgbase so missing split members trigger rebuilds.
+        base_db_names = {name for name, db_entry in db_entries.items() if db_entry.base == pkgbase}
+        needs_build = (
+            force
+            or any(
+                entry.name not in db_entries
+                or db_entries[entry.name].version != entry.version
+                or db_entries[entry.name].base != pkgbase
+                for entry in entries
+            )
+            or any(name in repair for name in ({e.name for e in entries} | base_db_names))
         )
         if needs_build:
             primary = entries[0]
