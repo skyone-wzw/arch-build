@@ -6,8 +6,8 @@ version = 1
 [[package]]
 name = "cc-switch-bin"
 source = "aur"
-version = "4.0.40-1"
-commit = "bf492c87e875a4da1881a4a41bafa6335a43707a"
+version = "4.0.44-1"
+commit = "8501f9a520efdda714576be85e7d3d16f33aed04"
 
 [[package]]
 name = "esp-idf"
